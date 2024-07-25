@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html>
+	<h1>WEBGPU Custom Component Test</h1>
+	<webgpu-widget/>
+</html>
+
+<script>
+	/*Some Basic Combinators*/
+	const	VOID_THUNK	=	(...a)=>{};
+	const	IF			=	(C,T,F)=>(...a)=> (C(...a)) ? T(...a) : F(...a);
+	/*Generator Combinators*/
+	G_OF_GF = (g,...a) => g(...a);
+	GF_OF_G	= (g) => (...a)=> g;
+
+	GFGF_WHILE	= (g) => (h) => (...a) => (...b) => function*(){
+			let H = h(...b);
+				for(x of g(...a))
+					if(x)
+						yield H;
+					else
+						break;
+			};
+</script>
+
+
+<script>
+'use strict';
+
+
+	//All the Data (Input, Vertex, & Colour) needed to supply to the GPU for the test. This can be freely edited (providing kept valid) and will draw a series of triangles.
+	let my_index_data 	= [0,1,2];
+	let my_vertex_data 	= [[-1,-1,0,1],[1,-1,0,1],[0,1,0,1]].flat();
+	let my_colour_data 	= [[1,0,0,1],[0,1,0,1],[0,0,1,1]].flat();
+
+	let CL = my_colour_data.length;
+	let VL =my_vertex_data.length;
+	let IL = my_index_data.length;
+// Set Up a consistant choice of locations for the buffered data 
+let [colour_location,vertex_location] = [0,1];
+		//The Actual Shader we will be running for this demo
+	let my_webgpu_shader_code =
+`
+alias T = vec4<f32>;
+
+	@group(0) @binding(0) var<uniform>	mu	: vec2<f32>;
+
+struct struct_one {
+	@location(${vertex_location}) position_data	:	T,
+	@location(${colour_location}) colour_data	: 	T,
+}
+struct struct_two {
+	@builtin(position) 				position_data 	: T,
+	@location(${colour_location}) 	colour_data 	: T,
+}
+
+@vertex
+fn vertex_main(input : struct_one) -> struct_two {
+	var output : struct_two;
+	output.position_data 	= T(input.position_data[0] * mu[0] - input.position_data[1] * mu[1],input.position_data[0] * mu[1] + input.position_data[1] * mu[0],input.position_data[2],input.position_data[3]);
+	output.colour_data 		= input.colour_data;
+	return output;
+}
+@fragment
+fn fragment_main(input : struct_two) -> @location(0)	T {
+	return input.colour_data;
+}
+`;
+
+const webgpu_shader_module_config={code:my_webgpu_shader_code};
+const	my_webgpu_swapchain_format = "bgra8unorm";
+
+let frame_gen_gen = ((canvas,context)=>{
+		let	my_webgpu_gpu;
+		let my_webgpu_adaptor;
+		let my_webgpu_device;
+
+
+		/*
+			Manually Hoisting the ambinet context of components we need for rendering and need to keep track of / their validness between rendering
+			Not striktly necessery for this project but
+		*/
+			let	my_webgpu_context_config;
+		let	my_webgpu_shader_module;
+
+			let	my_webgpu_vertex_buffer_config;
+		let	my_webgpu_vertex_buffer;
+		
+			let my_webgpu_index_buffer_config;
+		let my_webgpu_index_buffer;
+
+			let my_webgpu_colour_buffer_config;
+		let	my_webgpu_colour_buffer;
+
+			let my_webgpu_uniform_buffer_config;
+		let my_webgpu_uniform_buffer;
+
+			let my_vertex_state_config;
+		let my_webgpu_vertex_state;
+
+		let my_webgpu_fragment_state;
+
+			let my_webgpu_depth_format;
+			let	my_webgpu_depth_texture_config;
+		let	my_webgpu_depth_texture;
+
+			let	my_webgpu_render_pipeline_config;
+		let	my_webgpu_render_pipeline;
+
+			let	my_webgpu_bind_group_0_config;
+		let my_webgpu_bind_group_0;
+
+		const	uniform_write_buff = new Float32Array(2);
+
+		let my_webgpu_view;
+
+		let my_webgpu_render_pass_descriptor;
+
+		let my_webgpu_frame;
+
+		let been_set = false;
+
+		const setup =  (async () => {
+						my_webgpu_context_config={device:my_webgpu_device, format:my_webgpu_swapchain_format, usage:GPUTextureUsage.RENDER_ATTACHMENT, alphaMode:"premultiplied"};
+						context.configure(my_webgpu_context_config);
+						my_webgpu_shader_module=await my_webgpu_device.createShaderModule(webgpu_shader_module_config);
+
+						// Assemble the Buffer configs
+						my_webgpu_vertex_buffer_config	=	{size: 4 * VL, usage:GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST, mappedAtCreation: true};
+						my_webgpu_index_buffer_config	=	{size: 4 * IL, usage:GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST, mappedAtCreation: true};
+						my_webgpu_colour_buffer_config	=	{size: 4 * CL, usage:GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST, mappedAtCreation: true};
+						my_webgpu_uniform_buffer_config		=	{size:	4*2,usage:GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST};
+
+						//Ask and wait for ALL the buffers
+						[my_webgpu_vertex_buffer,my_webgpu_index_buffer,my_webgpu_colour_buffer,my_webgpu_uniform_buffer] = await Promise.all([my_webgpu_vertex_buffer_config,my_webgpu_index_buffer_config,my_webgpu_colour_buffer_config,my_webgpu_uniform_buffer_config].map(c => my_webgpu_device.createBuffer(c)));
+
+						//Write Data to the requisite Buffers & Then Unmap Then
+						function my_buffer_init(T,b,d){
+							new T(b.getMappedRange()).set(d);
+							b.unmap();};
+						[[Float32Array,my_webgpu_vertex_buffer,my_vertex_data],[Float32Array,my_webgpu_colour_buffer,my_colour_data]].forEach(([T,b,d])=> my_buffer_init(T,b,d));
+
+							my_buffer_init(Uint32Array,my_webgpu_index_buffer,my_index_data);
+							console.log(my_webgpu_uniform_buffer);
+
+						//Set-Up the Vertex State
+							my_vertex_state_config = [{arrayStride: 16,attributes:[{format:`float32x4`, offset:0, shaderLocation:colour_location}]},{arrayStride: 16,attributes:[{format:`float32x4`, offset:0, shaderLocation:vertex_location}]}];
+						my_webgpu_vertex_state={module:my_webgpu_shader_module, entryPoint:`vertex_main`, buffers:my_vertex_state_config};
+
+						//Set-Up the Fragment State
+							my_webgpu_fragment_state={module:my_webgpu_shader_module, entryPoint:`fragment_main`, targets:[{format:my_webgpu_swapchain_format}]};
+
+						//Set up the depth Stencil
+							my_webgpu_depth_format="depth24plus-stencil8";
+							my_webgpu_depth_texture_config={size:{width:canvas.width, height:canvas.height, depth:1}, format:my_webgpu_depth_format, usage: GPUTextureUsage.RENDER_ATTACHMENT};
+						my_webgpu_depth_texture = await my_webgpu_device.createTexture(my_webgpu_depth_texture_config);
+
+						//Set up the Pipeline
+							my_webgpu_render_pipeline_config={layout:'auto', vertex: my_webgpu_vertex_state, fragment:my_webgpu_fragment_state, depthStencil:{format: my_webgpu_depth_format,depthWriteEnabled: true, depthCompare:"less"}};
+						my_webgpu_render_pipeline=my_webgpu_device.createRenderPipeline(my_webgpu_render_pipeline_config);
+						//Set up bind-groups
+							my_webgpu_bind_group_0_config	=	{layout	:	my_webgpu_render_pipeline.getBindGroupLayout(0),entries	:	[{binding:0,resource:{buffer:my_webgpu_uniform_buffer}}]};
+						my_webgpu_bind_group_0	=	my_webgpu_device.createBindGroup(my_webgpu_bind_group_0_config);
+
+						//Create the View
+						my_webgpu_view=my_webgpu_depth_texture.createView();
+						//Set Up the Render-Pass
+						my_webgpu_render_pass_descriptor = {colorAttachments:[{view:undefined, loadOp:"clear",clearValue:[0,0,0,1], storeOp:"store"}], depthStencilAttachment: {view: my_webgpu_view, depthLoadOp:"clear", depthClearValue:1, depthStoreOp:"store", stencilLoadOp:"clear", stencilClearValue:0, stencilStoreOp:"store"}};
+						
+
+						my_webgpu_frame = function(){
+							console.log("frame called");
+									//Update Uniforms
+									[uniform_write_buff[0],uniform_write_buff[1]] = ((x) => [Math.cos(x),Math.sin(x)])(self.performance.now()/10000);
+									my_webgpu_device.queue.writeBuffer(my_webgpu_uniform_buffer,0,uniform_write_buff);
+
+									my_webgpu_render_pass_descriptor.colorAttachments[0].view = context.getCurrentTexture().createView();
+									let my_webgpu_command_encoder = my_webgpu_device.createCommandEncoder();
+									let my_webgpu_render_pass=my_webgpu_command_encoder.beginRenderPass(my_webgpu_render_pass_descriptor);
+
+										my_webgpu_render_pass.setPipeline(my_webgpu_render_pipeline);
+										my_webgpu_render_pass.setVertexBuffer(colour_location,my_webgpu_colour_buffer);
+										my_webgpu_render_pass.setVertexBuffer(vertex_location,my_webgpu_vertex_buffer);
+										my_webgpu_render_pass.setIndexBuffer(my_webgpu_index_buffer, `uint32`);
+										my_webgpu_render_pass.setBindGroup(0,my_webgpu_bind_group_0);
+										my_webgpu_render_pass.drawIndexed(IL);
+										my_webgpu_render_pass.end();
+									my_webgpu_device.queue.submit([my_webgpu_command_encoder.finish()]);
+								}
+						been_set = true;
+						});
+
+		let valid_check = ()=>{return been_set;};
+
+		/*This Generaor emits ther frame_function, either by having one pre-prepeared or by trying to prep one first*/
+		let frame_generator = async function* (){
+			while (true){
+						if(my_webgpu_device){
+							if(valid_check()){
+								yield	my_webgpu_frame;
+							}
+							else await setup();
+						}
+						else{
+							[my_webgpu_gpu,my_webgpu_adaptor,my_webgpu_device] = await get_stack().then(x => [x?.gpu,x?.adaptor,x?.device]);
+							been_set = false;
+						}
+				};
+		};
+		return frame_generator;
+	});
+
+</script>
+<script>
+'use strict';
+/*
+	This class is a simple wrapper for a boolean to be used as a watchdog for our rendering loops' lifecycle to know to quit rendering if the widget is disconnected from the DOM (a new one will be respawned on re-connection);
+	It is of fundemnetal importance that it is an object, not a primitive as the keep alive is meant to be voided (set to false and then refreashed with a new one) in a callback and that change be observeable in other contexts. This simpliy is not possible with just a boolean.
+	We chose this method over say events as to avoid polluting namespaces and also keep all messaging local to our widgit and not potentially bubbling up to other elements.
+*/
+
+class Simple_KeepAlive {
+	#keep_alive = true;
+	get keep_alive(){return this.#keep_alive};
+	set keep_alive(v){this.#keep_alive = v};
+	
+}
+
+/*
+	attempt to aquire a device and thus an adaptor from some navigator.gpu context.
+*/
+let get_stack = (async ()=>{
+	let gpu		=	self?.navigator?.gpu;
+	let adaptor = 	await gpu?.requestAdapter();
+	let device	=	await	adaptor?.requestDevice();
+		console.log(adaptor)
+		return {gpu:gpu,adaptor:adaptor,device:device};
+	}
+)
+
+let guard = (x)=> !((typeof x === typeof undefined) || Object.is(x,null));
+
+class WEBGPU_WIDGIT	extends HTMLElement{
+	#keep_alive	= new Simple_KeepAlive;
+	get #root(){return this;};
+	#canvas 	=	document.createElement('canvas');
+	#context	=	this.#canvas.getContext('webgpu');
+
+	constructor(){
+		super()
+		this.#root.appendChild(this.#canvas);
+	}
+
+	connectedCallback(){
+		console.log("connected");
+	
+		const	canvas		= this.#canvas;
+		const	context		= this.#context;
+
+		// This watchdog ensures that the render loop stops (and thus frees up resources) should the element get disconnected
+		this.#keep_alive	=	new Simple_KeepAlive;
+			var 	keep_alive	= this.#keep_alive;	// Point to CURRENT watchdog
+		const Guard = (()=> (keep_alive?.keep_alive));
+
+		let frame_generator = frame_gen_gen(canvas,context);
+
+		/*This Function takes a way of queueing via function call (read: self.requestAnimationFrame) R, and wrappes it around a frame generating function */
+		let request_based_loop = (async (fg,guard,R)=>{
+			let my_frames = await  fg();
+
+			var loop_combi = ( async (f)=>{
+				if(guard()){
+					let frame = await my_frames.next();
+					if(!frame.done)
+					R(()=>{frame.value();f()});
+				}
+			});
+			var looper =  () => loop_combi(looper);
+			looper();
+
+		})
+
+		/*finally we can despatch an async function to manage the rending. this function is self-cleaning in the sense that it terminates once it recives the kill signal*/
+		request_based_loop(frame_generator,Guard,self.requestAnimationFrame);
+
+		console.log("end of connectedCallback");
+	
+	}
+	disconnectedCallback(){
+		console.log("disconnected");
+		this.#keep_alive.keep_alive = false;
+		console.log(this.#keep_alive)
+		this.#keep_alive	= undefined;
+		console.log(this.#keep_alive)
+	};
+}
+customElements.define('webgpu-widget',WEBGPU_WIDGIT);
+</script>
