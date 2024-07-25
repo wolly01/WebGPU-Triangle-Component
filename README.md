@@ -14,3 +14,5 @@ The component itself is basic, spinning rgb triangle. Nothing fancy.
 
 ---
 We do not include licensing as this code is intended to serve as an example proof of concept to be looked at by learners to gain insight, not as a basis for any further work, at least without some amount of refactoring. For me to know *how* to properly refactor this code I need to be somewhere further ahead in my webgpu journy, so aany cleenup of this project I do weill happen not in the short-term.
+---
+Should the github-page be live, the example is avaliable [here](https://wolly01.github.io/WebGPU-Triangle-Component/). Note that in order for this example to run WebGPU needs to be supported and enabled on your browser.
